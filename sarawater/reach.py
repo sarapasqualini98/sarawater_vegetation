@@ -5,7 +5,25 @@ from pandas import DataFrame
 
 from sarawater.scenarios import Scenario, ConstScenario
 from sarawater.IHA import compute_IHA
-from sarawater.utils import _validate_positive_numeric
+
+
+def _validate_positive_numeric(value, param_name):
+    """Validate that a value is a positive finite number.
+
+    Parameters
+    ----------
+    value : any
+        The value to validate.
+    param_name : str
+        Name of the parameter for error messages.
+
+    Raises
+    ------
+    ValueError
+        If value is not a positive finite number.
+    """
+    if not isinstance(value, (float, int)) or not np.isfinite(value) or value <= 0:
+        raise ValueError(f"{param_name} must be a positive finite number, got {value}")
 
 
 class Reach:
@@ -179,7 +197,7 @@ class Reach:
         width=None,
         section=None,
     ):
-        """Add cross-section geometry, channel roughness and bed slope to the reach. Either coordinate pairs (composite cross section) or channel width (rectangular cross section) must be provided. When a width is provided, a two-point simple rectangular cross-section is created with a flat bed at elevation 0, corresponding to the coordinate pairs y [m] = [0, width] and z [m] = [0, 0]. When section coordinates are provided, they must be in the form of a CSV file or a DataFrame with columns 'y [m]' (transverse coordinate) and 'z [m]' (bed elevation).
+        """Add cross-section geometry, channel roughness and bed slope to the reach. Either coordinate pairs (composite cross section) or channel width (rectangular cross section) must be provided.
 
         Parameters
         ----------
@@ -255,6 +273,30 @@ class Reach:
 
         self.cross_section_coordinates = cross_section_coordinates
         return self
+
+    # VEGETATION 
+
+    def get_cross_section(self):
+        """
+        Return cross-section coordinates.
+        """
+        if hasattr(self, "section"):
+            return self.section #in order to get x(m) and z(m) coordinates of the cross section, which are needed for the vegetation module, which works on elevation above low flow water level
+        else:
+            raise ValueError("Cross section not defined.")
+
+
+    def stage_from_discharge(self, Q): #the veg. model is based on water elevation vs bar elevation
+        """
+        Convert discharge to water level using HQ relationship
+        stored in Reach.
+        """
+        if not hasattr(self, "HQ"):
+            raise ValueError("HQ relationship not defined in Reach.")
+        Qhq = self.HQ["Q"].values
+        Hhq = self.HQ["H"].values
+
+        return np.interp(Q, Qhq, Hhq)
 
     def add_grain_size_distribution(self, grain_data):
         """Add grain size distribution data to the reach. The input can be a single D50 value, a DataFrame with columns 'i(di)' and 'di[mm]', a 2D array with those columns, or a path to a CSV file containing that data.
@@ -574,3 +616,24 @@ class Reach:
                 df.to_excel(output_path, index=False, engine="openpyxl")
 
         return df
+def discharge_from_stage(self, stage):
+    return np.interp(stage,
+                     self.rating_curve.stage,
+                     self.rating_curve.Q)
+def compute_stage_from_discharge(self, Q):
+        """
+        Convert discharge into water stage using
+        hydraulic geometry approximation.
+
+        Needed by vegetation module.
+        """
+
+        # width-depth power law
+        a = self.width_coeff
+        b = self.width_exp
+
+        depth = a * (Q ** b)
+
+        stage = self.bed_elevation + depth
+
+        return stage

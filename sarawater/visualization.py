@@ -1098,3 +1098,376 @@ class ReachPlotter:
                 bbox_inches="tight",
             )
         return plt.gca()
+   
+   
+"""
+Vegetation visualization module for SARAwater
+
+Includes:
+- Original recruitment diagnostics (UNCHANGED)
+- Cross-section visualization
+- Window of Opportunity analysis
+- Hydrological variability diagnostics
+- Vegetation vs discharge relations
+
+ADDED:
+- Daily biomass evolution (Camporeale-type)
+- Bar elevation evolution (Zen-type feedback)
+- Eco-morphodynamic feedback diagnostics
+- Survival probability maps
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+
+# VEGETATION PLOTTER
+
+
+class VegetationPlotter:
+    """
+    Plot vegetation recruitment diagnostics
+    and eco-morphodynamic outputs.
+    """
+
+    def __init__(self, reach, output_dir="outputs"):
+        self.reach = reach
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    
+    # 1. EBE BANDS EVOLUTION 
+
+    def plot_ebe_bands(self, df_ebe: pd.DataFrame, save=False):
+
+        plt.figure(figsize=(12,6))
+
+        colors = {
+            "EBE1": "#66c2a5",
+            "EBE2": "#fc8d62",
+            "EBE3": "#8da0cb"
+        }
+
+        for band, color in colors.items():
+
+            lower = [
+                v[0] if isinstance(v, tuple) else np.nan
+                for v in df_ebe[band]
+            ]
+
+            upper = [
+                v[1] if isinstance(v, tuple) else np.nan
+                for v in df_ebe[band]
+            ]
+
+            plt.fill_between(
+                df_ebe["year"],
+                lower,
+                upper,
+                alpha=0.35,
+                color=color,
+                label=band
+            )
+
+            plt.plot(df_ebe["year"], lower, '--', color=color)
+            plt.plot(df_ebe["year"], upper, '--', color=color)
+
+        plt.xlabel("Year")
+        plt.ylabel("Elevation (m)")
+        plt.title(f"{self.reach.name} — Recruitment Elevation Bands")
+        plt.grid(alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+
+        if save:
+            plt.savefig(
+                os.path.join(self.output_dir, "ebe_bands.png"),
+                dpi=300
+            )
+
+        plt.show()
+
+    # 2. CROSS-SECTION WITH EBE 
+
+    def plot_cross_section_with_ebe(self, df_ebe, year, save=False):
+
+        xs = self.reach.cross_section["distance"]
+        zs = self.reach.cross_section["elevation"]
+
+        row = df_ebe[df_ebe["year"] == year].iloc[0]
+
+        plt.figure(figsize=(12,5))
+        plt.plot(xs, zs, color="black", linewidth=2,
+                 label="Cross-section")
+
+        colors = {
+            "EBE1": "#66c2a5",
+            "EBE2": "#fc8d62",
+            "EBE3": "#8da0cb"
+        }
+
+        for band, color in colors.items():
+            if isinstance(row[band], tuple):
+
+                zmin, zmax = row[band]
+
+                plt.axhspan(
+                    zmin,
+                    zmax,
+                    color=color,
+                    alpha=0.25,
+                    label=band
+                )
+
+        plt.xlabel("Distance (m)")
+        plt.ylabel("Elevation (m)")
+        plt.title(f"{self.reach.name} — Recruitment zones ({year})")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+
+        if save:
+            plt.savefig(
+                os.path.join(
+                    self.output_dir,
+                    f"cross_section_{year}.png"),
+                dpi=300
+            )
+
+        plt.show()
+
+    
+    # 3. WINDOW OF OPPORTUNITY EXPOSURE 
+
+    def plot_exposure_duration(self, df_ebe, Q, dates, save=False):
+
+        exposure = []
+
+        for _, row in df_ebe.iterrows():
+
+            if not isinstance(row["EBE3"], tuple):
+                exposure.append(np.nan)
+                continue
+
+            mask = dates.year == row["year"]
+            stage = self.reach.stage_from_discharge(Q[mask])
+
+            zmin, zmax = row["EBE3"]
+
+            exposed_days = (
+                (stage >= zmin) &
+                (stage <= zmax)
+            ).sum()
+
+            exposure.append(
+                exposed_days / len(stage) * 100
+            )
+
+        plt.figure(figsize=(10,5))
+        plt.bar(df_ebe["year"], exposure)
+
+        plt.ylabel("Exposure duration (%)")
+        plt.xlabel("Year")
+        plt.title(
+            f"{self.reach.name} — Window of Opportunity duration"
+        )
+
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+
+        if save:
+            plt.savefig(
+                os.path.join(
+                    self.output_dir,
+                    "exposure_duration.png"),
+                dpi=300
+            )
+
+        plt.show()
+
+    
+    # 4. HYDROLOGICAL VARIABILITY 
+
+    def plot_hydrological_variability(self, Q, dates, save=False):
+
+        years = np.unique(dates.year)
+        cvs = []
+
+        for y in years:
+            Qy = Q[dates.year == y]
+            cvs.append(np.std(Qy) / np.mean(Qy))
+
+        plt.figure(figsize=(10,5))
+        plt.plot(years, cvs, marker="o")
+
+        plt.axhline(
+            0.8,
+            linestyle="--",
+            color="red",
+            label="High variability threshold"
+        )
+
+        plt.xlabel("Year")
+        plt.ylabel("Cv (σQ / mean Q)")
+        plt.title("Hydrological variability index")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+
+        if save:
+            plt.savefig(
+                os.path.join(
+                    self.output_dir,
+                    "hydrological_variability.png"),
+                dpi=300
+            )
+
+        plt.show()
+
+    # 5. VEGETATION POTENTIAL VS DISCHARGE 
+
+    def plot_vegetation_potential_vs_Q(
+        self, df_ebe, Q, dates, save=False):
+
+        potentials = []
+        mean_Q = []
+
+        for _, row in df_ebe.iterrows():
+
+            mask = dates.year == row["year"]
+            stage = self.reach.stage_from_discharge(Q[mask])
+
+            mean_Q.append(Q[mask].mean())
+
+            if not isinstance(row["EBE3"], tuple):
+                potentials.append(0)
+                continue
+
+            zmin, zmax = row["EBE3"]
+
+            exposed = (
+                (stage >= zmin) &
+                (stage <= zmax)
+            ).sum()
+
+            potentials.append(
+                exposed / len(stage) * 100)
+
+        plt.figure(figsize=(10,6))
+        plt.scatter(mean_Q, potentials, s=80)
+
+        m, b = np.polyfit(mean_Q, potentials, 1)
+        plt.plot(mean_Q,
+                 m*np.array(mean_Q)+b,
+                 '--')
+
+        plt.xlabel("Mean annual discharge (m³/s)")
+        plt.ylabel("Recruitment potential (%)")
+        plt.title("Vegetation recruitment vs flow regime")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+
+        if save:
+            plt.savefig(
+                os.path.join(
+                    self.output_dir,
+                    "vegetation_vs_discharge.png"),
+                dpi=300
+            )
+
+        plt.show()
+
+    # 6. DAILY BIOMASS (CAMPOREALE)
+
+    def plot_daily_biomass(self, biomass_dict, dates):
+
+        elevations = np.array(sorted(biomass_dict.keys()))
+        B = np.array([biomass_dict[z] for z in elevations])
+
+        plt.figure(figsize=(12,6))
+
+        plt.imshow(
+            B,
+            aspect='auto',
+            origin='lower',
+            extent=[0, len(dates),
+                    elevations.min(),
+                    elevations.max()]
+        )
+
+        plt.colorbar(label="Biomass")
+        plt.xlabel("Time (days)")
+        plt.ylabel("Elevation (m)")
+        plt.title("Daily vegetation biomass evolution")
+        plt.tight_layout()
+        plt.show()
+
+    
+    # BAR ELEVATION (ZEN)
+
+    def plot_bar_elevation(self, bar_dict, dates):
+
+        elevations = np.array(sorted(bar_dict.keys()))
+        Z = np.array([bar_dict[z] for z in elevations])
+
+        plt.figure(figsize=(12,6))
+
+        plt.imshow(
+            Z,
+            aspect='auto',
+            origin='lower',
+            extent=[0, len(dates),
+                    elevations.min(),
+                    elevations.max()]
+        )
+
+        plt.colorbar(label="Elevation (m)")
+        plt.xlabel("Time (days)")
+        plt.ylabel("Initial elevation (m)")
+        plt.title("Bar elevation evolution (vegetation feedback)")
+        plt.tight_layout()
+        plt.show()
+
+    # 7. ECO-MORPHODYNAMIC FEEDBACK
+
+    def plot_eco_feedback(self, biomass_dict, bar_dict):
+
+        mean_B = []
+        dz = []
+
+        for z in biomass_dict:
+            mean_B.append(np.mean(biomass_dict[z]))
+            dz.append(bar_dict[z][-1] - bar_dict[z][0])
+
+        plt.figure(figsize=(8,6))
+        plt.scatter(mean_B, dz, s=70)
+
+        plt.xlabel("Mean biomass")
+        plt.ylabel("Elevation change (m)")
+        plt.title("Vegetation–Morphology feedback")
+        plt.grid(alpha=0.3)
+        plt.show()
+
+    # 8. SURVIVAL PROBABILITY
+
+    def plot_survival_probability(self, biomass_dict,
+                                  threshold=0.2):
+
+        elevations = []
+        survival = []
+
+        for z, B in biomass_dict.items():
+            elevations.append(z)
+            survival.append(np.mean(B > threshold))
+
+        plt.figure(figsize=(8,5))
+        plt.plot(elevations, survival, 'o-')
+
+        plt.xlabel("Elevation (m)")
+        plt.ylabel("Survival probability")
+        plt.title("Riparian survival probability vs elevation")
+        plt.grid(alpha=0.3)
+        plt.show()

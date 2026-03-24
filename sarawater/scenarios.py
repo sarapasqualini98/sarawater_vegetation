@@ -5,6 +5,7 @@ from numpy import ndarray
 
 from sarawater.IHA import compute_IHA_index, compute_IHA
 from sarawater import habitat as hab
+from sarawater import vegetation as veg
 from sarawater.sediment_load import (
     compute_sediment_load,
     compute_annual_sediment_volume,
@@ -124,7 +125,17 @@ class Scenario:
         plt.tight_layout()
 
         return plt.gca()
+    def compute_vegetation(self, cv_threshold=0.8):#serlet et al approach
 
+        EBE = veg.compute_recruitment_bands(
+            self.reach,
+            self.Qnat,
+            self.dates
+        )
+
+        self.vegetation = EBE
+
+        return EBE
     def compute_IHA(self, **kwargs) -> dict:
         """Compute the IHA for the scenario using the function compute_IHA().
         See the function documentation in IHA.py for more details on parameters and return values.
@@ -604,3 +615,43 @@ class PropScenario(Scenario):
         self.Qreq = Qbase + c_Qin * self.Qnat
         self.Qreq[self.Qreq < Qreq_min] = Qreq_min
         self.Qreq[self.Qreq > Qreq_max] = Qreq_max
+def compute_daily_vegetation(self):
+
+    from sarawater import vegetation as veg
+
+    elevations = veg.elevation_grid(
+        self.reach.get_cross_section()
+    )
+
+    B = veg.daily_biomass_model(
+        self.reach,
+        self.Qnat,
+        elevations
+    )
+
+    Z = veg.simulate_bar_evolution(
+        self.reach,
+        self.Qnat,
+        elevations,
+        B
+    )
+
+    self.daily_biomass = B
+    self.bar_elevation = Z
+
+    return B, Z
+
+def compute_vegetation(self):
+    """
+    Run vegetation dynamics module.
+    """
+
+    results = veg.run_vegetation_model(
+        self.reach,
+        self.Qnat,
+        self.dates
+    )
+
+    self.vegetation = results
+
+    return results
