@@ -655,3 +655,16 @@ def compute_vegetation(self):
     self.vegetation = results
 
     return results
+def compute_vegetation(self, params):
+
+    from sarawater import vegetation as veg
+
+    results = veg.run_vegetation_model(
+        self.reach,
+        self.Qnat,
+        self.dates,
+        params
+    )
+
+    self.vegetation = results
+    return results

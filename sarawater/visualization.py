@@ -1471,3 +1471,23 @@ class VegetationPlotter:
         plt.title("Riparian survival probability vs elevation")
         plt.grid(alpha=0.3)
         plt.show()
+
+def plot_model_comparison(self, results, dates):
+
+    Bdet = results["biomass_deterministic"]
+    Bser = results["biomass_serlet"]
+
+    elev = sorted(Bdet.keys())
+
+    M1 = np.array([Bdet[z] for z in elev])
+    M2 = np.array([Bser[z] for z in elev])
+
+    fig, ax = plt.subplots(1,2, figsize=(14,5))
+
+    im1=ax[0].imshow(M1, aspect="auto", origin="lower")
+    ax[0].set_title("Deterministic biomass")
+
+    im2=ax[1].imshow(M2, aspect="auto", origin="lower")
+    ax[1].set_title("Serlet proxy biomass")
+
+    plt.show()

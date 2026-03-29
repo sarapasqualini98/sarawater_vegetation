@@ -1,48 +1,104 @@
 """
 Vegetation module for SARAwater
 
-Implements:
-- Recruitment bands (Serlet et al. 2023)
-- Bar elevation feedback (Zen et al. 2016 concept)
-- Deterministic daily vegetation dynamics
-  inspired by Camporeale et al. 2006
+SERLET (2023)
 
-Works on single cross-section geometry.
+Original: 2D hydro-morphodynamic ecohydraulics
+SARAwater: 1D cross-section reduction
+
+Assumption:
+h(x,y,t) ≈ stage(t) − z_cross_section
+
+ZEN et al. (2016)
+
+Original: 2D morphodynamics
+SARAWater: elevation feedback proxy
+
+CAMPOREALE (2006)
+
+Original: stochastic SDE vegetation model
+SARAWater: deterministic reduced-order analogue
 """
 
 import numpy as np
 import pandas as pd
 
-# HYDROLOGICAL METRICS
+# PARAMETERS OBJECT
+
+
 class VegetationParameters:
 
-    def __init__(self,
-                 low_flow_percentile=20,
-                 ag=0.04,
-                 ad=0.08,
-                 mg=1.2,
-                 md=1.6):
+    def __init__(
+        self,
+        low_flow_percentile=20 #to be calibrated for each site (particularly if arid regions or snowmelt-rivers), but might be good to represent frequently exposed bars,
+        flood_percentile=90,
+        seasonal_windows=None, # Optional seasonal hydrological windows replacing percentiles like growth: [5,6,7], flood: [10,11,12]
+        ag=0.04, #vegetation growth coefficient ->  Controls biomass increase when discharge is below the
+        #optimal recrutiment treshold (Qcrit)
+        ad=0.08, #Flood-induced decay coefficient -> Controls biomass loss during high-flow stress
+        #(uprooting and inundation mortality)
+        mg=1.2, #growth exponent -> Defines NONLINEAR sensitivity of growth to flow deficit
+        md=1.6, #decay exponent -> Defines NONLINEAR sensitivity of decay to flow excess
+    #ag, ad, mg, md TO BE CALIBRATED FOR EACH SITE
+    ):
+        """
+        seasonal_windows example:
+        {
+            "growth":[4,5,6,7],
+            "flood":[10,11,12]
+        }
+        """
+
         self.low_flow_percentile = low_flow_percentile
+        self.flood_percentile = flood_percentile
+        self.seasonal_windows = seasonal_windows
+
+        # Camporeale analogue parameters
         self.ag = ag
         self.ad = ad
         self.mg = mg
         self.md = md
 
-def compute_cv(Q):
-    """Coefficient of variation of discharge."""
+
+
+# HYDROLOGICAL METRICS
+
+def compute_cv(Q): #cv = coefficient of variation of Stage (low CV = stable recruitment possible)
     Q = np.asarray(Q)
     return np.std(Q) / np.mean(Q)
 
 
 
-# EBE1 — Recruitment elevation band
+# SERLET HYDROLOGICAL WINDOWS
+
+
+def seasonal_thresholds(Q, dates, params):
+    """
+    Seasonal alternative to percentiles (Serlet-like).
+    """
+
+    if params.seasonal_windows is None:
+        low = np.percentile(Q, params.low_flow_percentile)
+        high = np.percentile(Q, params.flood_percentile)
+        return low, high
+
+    months = np.array([d.month for d in dates])
+
+    growth_mask = np.isin(months, params.seasonal_windows["growth"])
+    flood_mask = np.isin(months, params.seasonal_windows["flood"])
+
+    low = np.percentile(Q[growth_mask], 50)
+    high = np.percentile(Q[flood_mask], 70)
+
+    return low, high
+
+
+
+# RECRUITMENT BANDS (SERLET ADAPTATION)
 
 def compute_EBE1(stage, cv, cv_threshold=0.8):
-    """
-    Elevation band suitable for recruitment.
-    """
 
-    if cv > cv_threshold:
+    if cv > cv_threshold: 
         return None
 
     base = np.min(stage)
@@ -53,81 +109,46 @@ def compute_EBE1(stage, cv, cv_threshold=0.8):
     return z_min, z_max
 
 
-
-# EBE2 — Window of Opportunity
-
-
 def compute_EBE2(Q, Q_germination, min_days=30):
 
-    low_flow = Q < Q_germination
+    mask = Q < Q_germination
 
     windows = []
     count = 0
 
-    for i, val in enumerate(low_flow):
-
+    for i, val in enumerate(mask):
         if val:
             count += 1
         else:
             if count >= min_days:
-                windows.append((i-count, i))
+                windows.append((i - count, i))
             count = 0
 
     return windows
 
 
-
-# EBE3 — Flood mortality
-
 def compute_EBE3(Q, Q_mortality):
     return Q > Q_mortality
 
 
+# CROSS-SECTION REDUCTION (2D → 1D)
 
-# CROSS-SECTION ELEVATION GRID
-
-def elevation_grid(reach, Q, n_points=40,
-                   low_flow_percentile=20):
-    """
-    Generate candidate elevations outside the
-    permanently wetted channel.
-
-    Parameters
-    ----------
-    reach : Reach object
-    Q : discharge series
-    low_flow_percentile : defines active channel limit
-    """
+def elevation_grid(reach, Q, n_points=40, low_flow_percentile=20):
 
     cross_section = reach.get_cross_section()
 
-    zmin = np.min(cross_section[:,1])
-    zmax = np.max(cross_section[:,1])
+    zmax = np.max(cross_section[:, 1])
 
-    # hydraulic definition of active channel
     Q_low = np.percentile(Q, low_flow_percentile)
-    z_active = reach.stage_from_discharge(Q_low)
+    z_active = reach.compute_stage_from_discharge(Q_low)
 
-    elevations = np.linspace(z_active, zmax, n_points)
-
-    return elevations
+    return np.linspace(z_active, zmax, n_points)
 
 
-# DAILY BIOMASS MODEL
-# (Camporeale-inspired deterministic)
 
+# CAMPOREALE DETERMINISTIC ANALOGUE
 
-def daily_biomass_model(
-        reach,
-        Q,
-        elevations,
-        B0=0.05,
-        ag=0.04,
-        ad=0.08,
-        mg=1.2,
-        md=1.6):
-
-    Q = np.asarray(Q)
+def daily_biomass_model(reach, Q, elevations, params, B0=0.05):
 
     biomass = {}
 
@@ -138,43 +159,56 @@ def daily_biomass_model(
         B = np.zeros(len(Q))
         B[0] = B0
 
-        for t in range(len(Q)-1):
+        for t in range(len(Q) - 1):
 
+            # growth
             if Q[t] < Qcrit:
-                growth = ag * (Qcrit - Q[t])**mg
-                decay = 0.0
-            else:
-                growth = 0.0
-                decay = ad * (Q[t] - Qcrit)**md
+                growth = params.ag * (Qcrit - Q[t]) ** params.mg
+                decay = 0
 
-            B[t+1] = max(0, B[t] + growth - decay)
+            # flood decay
+            else:
+                growth = 0
+                decay = params.ad * (Q[t] - Qcrit) ** params.md
+
+            B[t + 1] = max(0, B[t] + growth - decay)
 
         biomass[z] = B
 
     return biomass
 
 
-# BAR ELEVATION FEEDBACK
-# (Zen et al. inspired)
+# SERLET BIOMASS PROXY
+
+def serlet_biomass_proxy(ebe2_windows, elevations):
+
+    biomass = {}
+
+    for z in elevations:
+
+        B = np.zeros(sum([w[1] - w[0] for w in ebe2_windows]))
+
+        for w in ebe2_windows:
+            B[w[0]:w[1]] += 1.0
+
+        biomass[z] = B
+
+    return biomass
+
+
+
+# ZEN FEEDBACK
+
 
 def update_bar_elevation(z, biomass,
                          alpha_dep=0.002,
                          beta_ero=0.0015):
-    """
-    Vegetation increases deposition,
-    low biomass allows erosion.
-    """
 
     dz = alpha_dep * biomass - beta_ero * (1 - biomass)
-
     return z + dz
 
 
-def simulate_bar_evolution(
-        reach,
-        Q,
-        elevations,
-        biomass_dict):
+def simulate_bar_evolution(reach, Q, elevations, biomass_dict):
 
     results = {}
 
@@ -182,23 +216,23 @@ def simulate_bar_evolution(
 
         B = biomass_dict[z]
 
-        Z = np.zeros(len(Q))
+        Z = np.zeros(len(B))
         Z[0] = z
 
-        for t in range(len(Q)-1):
-            Z[t+1] = update_bar_elevation(Z[t], B[t])
+        for t in range(len(B) - 1):
+            Z[t + 1] = update_bar_elevation(Z[t], B[t])
 
         results[z] = Z
 
     return results
 
 
-# VEGETATION MODEL
 
-def run_vegetation_model(reach, Q, dates):
+# MASTER MODEL
+
+def run_vegetation_model(reach, Q, dates, params):
 
     stage = reach.compute_stage_from_discharge(Q)
-
     cv = compute_cv(Q)
 
     ebe1 = compute_EBE1(stage, cv)
@@ -206,34 +240,39 @@ def run_vegetation_model(reach, Q, dates):
     if ebe1 is None:
         return {"recruitment": None}
 
-    Q_germ = np.percentile(Q, 30)
-    Q_mort = np.percentile(Q, 90)
+    Q_germ, Q_mort = seasonal_thresholds(Q, dates, params)
 
     ebe2 = compute_EBE2(Q, Q_germ)
     ebe3 = compute_EBE3(Q, Q_mort)
 
-    elevations = elevation_grid(
-        reach.get_cross_section()
+    elevations = elevation_grid(reach, Q,
+                                params.low_flow_percentile)
+
+    # MODEL 1 — deterministic
+    biomass_det = daily_biomass_model(
+        reach, Q, elevations, params
     )
 
-    biomass = daily_biomass_model(
-        reach,
-        Q,
-        elevations
+    # MODEL 2 — Serlet proxy
+    biomass_serlet = serlet_biomass_proxy(
+        ebe2, elevations
     )
 
-    bar_elevation = simulate_bar_evolution(
-        reach,
-        Q,
-        elevations,
-        biomass
+    bar_det = simulate_bar_evolution(
+        reach, Q, elevations, biomass_det
+    )
+
+    bar_serlet = simulate_bar_evolution(
+        reach, Q, elevations, biomass_serlet
     )
 
     return {
         "EBE1": ebe1,
         "EBE2": ebe2,
         "EBE3": ebe3,
-        "biomass": biomass,
-        "bar_elevation": bar_elevation,
-        "cv": cv
+        "biomass_deterministic": biomass_det,
+        "biomass_serlet": biomass_serlet,
+        "bar_det": bar_det,
+        "bar_serlet": bar_serlet,
+        "cv": cv,
     }

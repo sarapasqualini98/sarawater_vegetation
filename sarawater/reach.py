@@ -637,3 +637,15 @@ def compute_stage_from_discharge(self, Q):
         stage = self.bed_elevation + depth
 
         return stage
+def compute_stage_series(self, Q_series):
+    stages = []
+    for Q in Q_series:
+        stage, *_ = steady_flow_solver(
+            Q,
+            self.slope,
+            self.ks,
+            self.cross_section_coordinates["y [m]"],
+            self.cross_section_coordinates["z [m]"]
+        )
+        stages.append(stage)
+    return np.array(stages)
