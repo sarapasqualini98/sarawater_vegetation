@@ -320,7 +320,12 @@ def compute_sediment_load(
         df.to_csv(to_csv, index=False)
 
     return df
-
+def exner_update(z, qs, dx, porosity=0.4):
+    """
+    1D Exner equation update.
+    """
+    dzdt = -(1/(1-porosity))*np.gradient(qs, dx)
+    return z + dzdt
 
 def compute_annual_sediment_volume(
     df, to_csv=None, as_dict=False, to_ton=False, rho_s=2650

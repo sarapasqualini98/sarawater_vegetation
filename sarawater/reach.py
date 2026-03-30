@@ -27,6 +27,7 @@ def _validate_positive_numeric(value, param_name):
 
 
 class Reach:
+
     def __init__(self, name: str, dates: list, Qnat: ndarray, Qabs_max: float):
         """Represents a river reach.
 
@@ -275,7 +276,12 @@ class Reach:
         return self
 
     # VEGETATION 
-
+    def get_cross_section_elevation(self):
+        """
+        Returns lateral elevation array z(y)
+        required by vegetation module.
+        """
+        return self.cross_section[:,1]
     def get_cross_section(self):
         """
         Return cross-section coordinates.

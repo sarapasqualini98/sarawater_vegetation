@@ -1491,3 +1491,23 @@ def plot_model_comparison(self, results, dates):
     ax[1].set_title("Serlet proxy biomass")
 
     plt.show()
+
+
+def plot_zen_comparison(results):
+
+    z0 = results["elevation"]
+    z1 = results["zen_serlet"]
+    z2 = results["zen_biomass"]
+
+    plt.figure()
+
+    plt.plot(z0, label="Initial")
+    plt.plot(z1, label="Zen (Serlet)")
+    plt.plot(z2, label="Zen (Biomass)")
+
+    plt.legend()
+    plt.title("Morphodynamic evolution comparison")
+    plt.xlabel("Cross-section index")
+    plt.ylabel("Elevation")
+
+    plt.show()

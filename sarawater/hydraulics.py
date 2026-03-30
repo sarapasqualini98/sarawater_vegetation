@@ -20,7 +20,23 @@ def residual_uniFlow_rect(depth, Q, B, ks, slope):
     Q_computed = Omega * ks * Rh ** (2 / 3) * slope**0.5
 
     return Q_computed / Q - 1
+def compute_stage_timeseries(Q_series, reach):
+    """
+    Convert discharge series into stage using rating curve.
+    Required by vegetation module (Serlet recruitment).
+    """
+    stage = []
 
+    for Q in Q_series:
+        h, *_ = steady_flow_solver(Q, reach)
+        stage.append(h)
+
+    return np.array(stage)
+def compute_recession_rate(stage):
+    """
+    dη/dt used in recruitment box model.
+    """
+    return -np.gradient(stage)
 
 def residual_invEngelund_cs(
     h: float, Q: float, y: np.ndarray, z: np.ndarray, ks: float, slope: float
