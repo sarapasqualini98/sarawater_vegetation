@@ -1104,8 +1104,9 @@ class ReachPlotter:
             )
         return plt.gca()
 
-    #Riparian Vegetation Analysis visualization
-    NAVY = "#0B2454"
+
+#Riparian Vegetation Analysis visualization
+NAVY = "#0B2454"
 BLUE = "#2E86AB"
 WATER_LIGHT = "#DCEEF8"
 GREEN = "#2F855A"
