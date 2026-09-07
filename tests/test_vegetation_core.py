@@ -32,27 +32,6 @@ def _hourly_reach(hours: int = 24 * 12, cells: int = 41) -> Reach:
     reach.add_grain_size_distribution(30.0)
     return reach
 
-
-def _dummy_forcing(z: np.ndarray) -> HydraulicVegetationForcing:
-    n_t = 12
-    water = np.linspace(float(np.min(z)) - 0.2, float(np.median(z)), n_t)
-    zeros_t = np.zeros(n_t)
-    zeros_tx = np.zeros((n_t, z.size))
-    return HydraulicVegetationForcing(
-        discharge=np.ones(n_t),
-        water_level=water,
-        velocity=zeros_t,
-        wetted_area=zeros_t,
-        wetted_perimeter=zeros_t,
-        depth=zeros_tx,
-        shear_stress=zeros_tx,
-        shields_d50=zeros_tx,
-        d50_m=0.03,
-        groundwater_stage=water.copy(),
-        recession_rate_cm_day=np.zeros(n_t, dtype=float),
-    )
-
-
 def test_defaults_match_latest_recruitment_and_mortality_alignment():
     """The public defaults encode the revised scientific design."""
     cfg = VegetationConfig()

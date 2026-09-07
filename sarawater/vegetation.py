@@ -132,9 +132,9 @@ def recession_mortality_coefficient(stage: pd.Series) -> tuple[float, str, float
     The positive stage-decline rate is expressed in cm/day and averaged over
     the preceding 72 hours. Rates of 0--5 cm/day are favourable, 5--10 cm/day
     stressful and >10 cm/day lethal. The annual/window coefficient is
-    ``M=(3*%lethal + %stressful)/3``. M remains a recruitment diagnostic; the
-    dynamic drought routine uses the same classes only to modulate damage when
-    roots are already disconnected from the instantaneous groundwater proxy.
+    ``M=(3*%lethal + %stressful)/3``. M remains a Recruitment Box / EBE
+    diagnostic. The dynamic drought routine uses actual root-zone water deficit;
+    recession rate is reported for interpretation but does not multiply death.
     """
     stage = stage.sort_index().dropna()
     if stage.size < 2:
@@ -338,56 +338,113 @@ def update_mechanical_damage(
     enable_shear: bool = True,
     enable_shields: bool = True,
     shields_damage_rate_multiplier: float = 1.0,
+    mechanical_resistance_age_days: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    del emerged_alive
-    fraction = shared_ontogenetic_fraction(effective_age_hours, adult_age_days)
-    tau_crit = float(shear_seedling_critical_pa) + fraction * (
-        float(shear_adult_critical_pa) - float(shear_seedling_critical_pa)
+    """Update direct-hydraulic and bed-mobility screening indices.
+
+    Direct hydraulic damage is intentionally represented as a parsimonious
+    bed-shear screening proxy rather than a complete uprooting model. A full
+    mechanical formulation would require plant diameter, projected area,
+    flexibility, root architecture, pull-out resistance and local scour, which
+    are not generic user inputs in SARAwater (Karrenberg et al., 2003;
+    Edmaier et al., 2011, 2015; Bywater-Reyes et al., 2015; Calvani et al.,
+    2019).
+
+    The default 10--30 Pa range is informed by Pasquale et al. (2014,
+    Hydrological Processes 28:5189--5203), whose River Thur experiment on
+    temperate Salix cuttings showed increasing mortality across roughly
+    10--30+ Pa peak bed-shear classes. These values are screening references,
+    not universal physiological thresholds. The local threshold develops over
+    approximately one effective growing season and damage is event-specific:
+    accumulated damage is reset after emergence instead of imposing an
+    unsupported universal inter-event recovery law.
+
+    Shields number is treated separately. ``theta_c`` is a sediment-mobility
+    gate, not a biological mortality threshold. Values around 0.03--0.06 are
+    commonly used for gravel incipient motion and 0.045 is retained as the
+    central SARAwater default. Direct Shields mortality should normally remain
+    disabled in this fixed-cross-section model because actual scour depth and
+    root exposure are not simulated.
+
+    ``shields_adult_resistance_multiplier`` and ``reference_hours_adult`` are
+    retained in the public API for backward compatibility but are no longer
+    used to force unrelated processes onto one common 15-year resistance law.
+    """
+    del shields_adult_resistance_multiplier, reference_hours_adult
+
+    age_days = np.maximum(np.asarray(effective_age_hours, dtype=float), 0.0) / HOURS_PER_DAY
+    development_days = (
+        float(mechanical_resistance_age_days)
+        if mechanical_resistance_age_days is not None
+        else min(float(adult_age_days), 183.0)
     )
-    shields_resistance = 1.0 + fraction * (
-        float(shields_adult_resistance_multiplier) - 1.0
-    )
-    reference_hours = float(reference_hours_seedling) + fraction * (
-        float(reference_hours_adult) - float(reference_hours_seedling)
+    mechanical_fraction = np.clip(
+        age_days / max(development_days, 1e-12), 0.0, 1.0
     )
 
-    exponent = max(float(damage_exponent), 1.0)
+    # Legacy field names are kept in VegetationConfig. Here they represent the
+    # early-stage damage-onset and first-year/older severe-damage references.
+    tau_low = max(float(shear_seedling_critical_pa), 1e-12)
+    tau_high = max(float(shear_adult_critical_pa), tau_low)
+    tau_crit = tau_low + mechanical_fraction * (tau_high - tau_low)
     shear_excess = np.maximum(
-        np.asarray(tau, float) / np.maximum(tau_crit, 1e-12) - 1.0, 0.0
+        np.asarray(tau, dtype=float) / np.maximum(tau_crit, 1e-12) - 1.0, 0.0
     )
+
     bed_threshold = max(float(shields_bed_critical), 1e-12)
     shields_bed_excess = np.maximum(
-        np.asarray(theta, float) / bed_threshold - 1.0, 0.0
+        np.asarray(theta, dtype=float) / bed_threshold - 1.0, 0.0
     )
-    shields_effective_excess = shields_bed_excess / np.maximum(
-        shields_resistance, 1e-12
+    # No biological age multiplier is imposed on a sediment-transport index.
+    shields_effective_excess = shields_bed_excess.copy()
+    shields_resistance = np.ones_like(shields_bed_excess, dtype=float)
+
+    # Pasquale et al. (2014) reported an approximately linear mortality-shear
+    # relation in the field campaigns, hence p=1 is the evidence-oriented
+    # default. Other exponents remain available for sensitivity analysis.
+    exponent = max(float(damage_exponent), 1.0)
+    reference_hours = np.full_like(
+        np.asarray(tau, dtype=float),
+        max(float(reference_hours_seedling), 1e-12),
+        dtype=float,
     )
 
-    submerged_alive = np.asarray(submerged_alive, dtype=bool)
+    submerged = np.asarray(submerged_alive, dtype=bool)
     if enable_shear:
-        shear_damage[submerged_alive] += (
-            shear_excess[submerged_alive] ** exponent
+        shear_damage[submerged] += (
+            shear_excess[submerged] ** exponent
             * float(dt_hours)
-            / np.maximum(reference_hours[submerged_alive], 1e-12)
+            / reference_hours[submerged]
         )
     if enable_shields:
-        shields_damage[submerged_alive] += (
+        shields_damage[submerged] += (
             float(shields_damage_rate_multiplier)
-            * shields_effective_excess[submerged_alive] ** exponent
+            * shields_effective_excess[submerged] ** exponent
             * float(dt_hours)
-            / np.maximum(reference_hours[submerged_alive], 1e-12)
+            / reference_hours[submerged]
         )
 
+    # Event-specific memory: a new flood starts a new screening event. This is
+    # deliberately simpler than an unsupported universal recovery half-life.
+    emerged = np.asarray(emerged_alive, dtype=bool)
+    shear_damage[emerged] = 0.0
+    shields_damage[emerged] = 0.0
+    if not enable_shields:
+        shields_damage[:] = 0.0
+
+    zeros = np.zeros_like(reference_hours)
     return shear_damage, shields_damage, {
-        "ontogenetic_fraction": fraction,
+        "ontogenetic_fraction": mechanical_fraction,  # legacy key
+        "mechanical_development_fraction": mechanical_fraction,
         "tau_critical": tau_crit,
-        "theta_bed_critical": np.full_like(np.asarray(theta, float), bed_threshold),
+        "theta_bed_critical": np.full_like(np.asarray(theta, dtype=float), bed_threshold),
         "shields_resistance_factor": shields_resistance,
         "shear_excess": shear_excess,
         "shields_bed_excess": shields_bed_excess,
         "shields_effective_excess": shields_effective_excess,
-        "shields_excess": shields_effective_excess,
+        "shields_excess": shields_effective_excess,  # backward-compatible key
         "dose_reference_hours": reference_hours,
+        "dose_recovery_half_life_hours": zeros,
     }
 
 
@@ -477,13 +534,47 @@ def age_dependent_root_depth(
     initial_depth_m: float,
     adult_depth_m: float,
     adult_age_days: float,
+    early_growth_m_per_day: float = 0.0075,
+    first_year_max_depth_m: float = 0.80,
+    first_year_effective_days: float = 183.0,
 ) -> np.ndarray:
-    """Root access using the same effective-age clock as all mortality traits."""
-    fraction = shared_ontogenetic_fraction(effective_age_hours, adult_age_days)
-    depth = float(initial_depth_m) + fraction * (
-        float(adult_depth_m) - float(initial_depth_m)
-    )
-    return np.clip(depth, 0.0, max(float(adult_depth_m), 0.0))
+    """Approximate root-water reach for temperate pioneer Salicaceae [m].
+
+    Early root development is separated from the former 15-year linear trait
+    interpolation. Cottonwood/willow recruitment literature supports root
+    extension of order 0.5--1 cm d^-1 when young plants can track a receding
+    water table (Mahoney & Rood, 1998; Amlin & Rood, 2002). SARAwater therefore
+    uses a central 0.75 cm d^-1 early-growth default and caps first-year root
+    reach at about 0.8 m. These are generic screening defaults rather than
+    species constants.
+
+    After one effective growing season, older/pre-existing vegetation is
+    slowly interpolated toward ``adult_depth_m``. This preserves a parsimonious
+    user interface: no stem diameter, detailed root architecture or
+    species-specific allometry is required.
+    """
+    age_days = np.maximum(np.asarray(effective_age_hours, dtype=float), 0.0) / HOURS_PER_DAY
+    z0 = max(float(initial_depth_m), 0.0)
+    zadult = max(float(adult_depth_m), z0)
+    zfirst = np.clip(float(first_year_max_depth_m), z0, zadult)
+    growth = max(float(early_growth_m_per_day), 0.0)
+    first_days = max(float(first_year_effective_days), 1e-12)
+
+    early_depth = np.minimum(z0 + growth * age_days, zfirst)
+    depth = early_depth.copy()
+
+    older = age_days > first_days
+    if np.any(older):
+        late_fraction = np.clip(
+            (age_days[older] - first_days)
+            / max(float(adult_age_days) - first_days, 1e-12),
+            0.0,
+            1.0,
+        )
+        depth[older] = zfirst + late_fraction * (zadult - zfirst)
+
+    return np.clip(depth, 0.0, zadult)
+
 
 def update_drought_damage(
     drought_damage: np.ndarray,
@@ -506,85 +597,121 @@ def update_drought_damage(
     tolerance_hours_adult: float = 14.0 * HOURS_PER_DAY,
     enabled: bool = True,
     damage_rate_multiplier: float = 1.0,
+    capillary_fringe_m: float = 0.40,
+    root_early_growth_m_per_day: float = 0.0075,
+    root_first_year_max_depth_m: float = 0.80,
+    root_first_year_effective_days: float = 183.0,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    """Update drought damage from actual root-zone disconnection.A live emerged plant is exposed when
-    the instantaneous groundwater proxy is deeper than its age-dependent root
-    depth. The consecutive tolerance increases linearly from 48 hours for a
-    seedling to 14 days for an adult. Damage starts only after that tolerance.
-    The preceding-72-hour recession class modulates severity: 0--5 cm/day = 1,
-    5--10 cm/day = 2, and >10 cm/day = 3. This imports the empirically used
-    Serlet/Burke recession classes without pretending that their annual M
-    coefficient is itself a cell-level mortality equation.
+    """Update drought stress from root-zone water disconnection.
+
+    Drought is driven by actual root-zone water access rather than recession
+    rate alone. The relevant deficit is
+
+    ``max(water_table_depth - (root_depth + capillary_fringe), 0)``.
+
+    Damage accumulates as a dimensionless root-deficit-day screening index,
+    ``D += (deficit / accessible_depth)^p * dt / 24 h``. This lets both
+    severity and duration matter while keeping the formulation parsimonious.
+    Once root-zone access returns, the event-specific drought counter resets;
+    no universal recovery half-life is imposed.
+
+    Recession rate is retained only as a diagnostic. Around 1--2 cm d^-1 can
+    promote root elongation in some Salix/Populus treatments, responses around
+    3 cm d^-1 are species dependent and Stella et al. (2010) reported complete
+    mortality in their tested first-year trees at >=6 cm d^-1. These are
+    interpretation ranges rather than universal mortality thresholds
+    (Mahoney & Rood, 1998; Amlin & Rood, 2002; Shafroth et al., 2000;
+    Stella et al., 2010).
+
+    ``reference_hours_*`` and ``tolerance_hours_*`` remain accepted for
+    backward compatibility but no longer control mortality.
     """
+    del (
+        reference_hours_seedling,
+        reference_hours_adult,
+        tolerance_hours_seedling,
+        tolerance_hours_adult,
+    )
+
     damage = np.asarray(drought_damage, dtype=float)
     clock = np.asarray(disconnection_hours, dtype=float)
     bed = np.asarray(bed_elevation, dtype=float)
     alive = np.asarray(alive, dtype=bool)
     emerged = np.asarray(alive_emerged, dtype=bool)
-    fraction = shared_ontogenetic_fraction(effective_age_hours, adult_age_days)
+
     root_depth = age_dependent_root_depth(
         effective_age_hours,
         initial_depth_m=initial_root_depth_m,
         adult_depth_m=adult_root_depth_m,
         adult_age_days=adult_age_days,
+        early_growth_m_per_day=root_early_growth_m_per_day,
+        first_year_max_depth_m=root_first_year_max_depth_m,
+        first_year_effective_days=root_first_year_effective_days,
     )
     water_table_depth = np.maximum(bed - float(groundwater_stage), 0.0)
-    deficit = np.maximum(water_table_depth - root_depth, 0.0)
-    water_accessible = water_table_depth <= root_depth
+    accessible_depth = root_depth + max(float(capillary_fringe_m), 0.0)
+    deficit = np.maximum(water_table_depth - accessible_depth, 0.0)
+    relative_deficit = deficit / np.maximum(accessible_depth, 0.05)
+    water_accessible = deficit <= 0.0
     disconnected = alive & emerged & (deficit > 0.0)
 
-    old_clock = clock.copy()
     clock[disconnected] += float(dt_hours)
     clock[~disconnected] = 0.0
 
-    tolerance_hours = float(tolerance_hours_seedling) + fraction * (
-        float(tolerance_hours_adult) - float(tolerance_hours_seedling)
-    )
-    reference_hours = float(reference_hours_seedling) + fraction * (
-        float(reference_hours_adult) - float(reference_hours_seedling)
-    )
-    active_dt = np.maximum(
-        np.minimum(clock, old_clock + float(dt_hours))
-        - np.maximum(old_clock, tolerance_hours),
-        0.0,
-    )
-    damaging = disconnected & (active_dt > 0.0)
-    relative_deficit = deficit / np.maximum(root_depth, 0.05)
-    recession = max(float(recession_rate_cm_day), 0.0)
-    if recession <= 5.0:
-        recession_multiplier = 1.0
-    elif recession <= 10.0:
-        recession_multiplier = 2.0
-    else:
-        recession_multiplier = 3.0
-
-    if enabled and np.any(damaging):
-        hydraulic_severity = (1.0 + relative_deficit[damaging]) ** max(
-            float(damage_exponent), 1.0
-        )
-        damage[damaging] += (
+    if enabled and np.any(disconnected):
+        exponent = max(float(damage_exponent), 1.0)
+        damage[disconnected] += (
             float(damage_rate_multiplier)
-            * recession_multiplier
-            * hydraulic_severity
-            * active_dt[damaging]
-            / np.maximum(reference_hours[damaging], 1e-12)
+            * relative_deficit[disconnected] ** exponent
+            * float(dt_hours)
+            / HOURS_PER_DAY
         )
 
+    # Event-specific recovery: when water access is restored, the accumulated
+    # disconnection dose is cleared. This avoids an invented universal recovery
+    # coefficient across biologically different stress processes.
+    reconnected = alive & ~disconnected
+    damage[reconnected] = 0.0
     damage[~alive] = 0.0
     clock[~alive] = 0.0
+
+    # Diagnostic recession markers drawn from the experimental response range;
+    # they do not multiply drought mortality.
+    recession = max(float(recession_rate_cm_day), 0.0)
+    fav = 2.0
+    severe = 6.0
+    if recession <= fav:
+        recession_severity = 0.0
+    elif recession < severe:
+        recession_severity = (recession - fav) / (severe - fav)
+    else:
+        recession_severity = 1.0 + (recession - severe) / severe
+
+    root_fraction = np.clip(
+        (root_depth - max(float(initial_root_depth_m), 0.0))
+        / max(float(adult_root_depth_m) - float(initial_root_depth_m), 1e-12),
+        0.0,
+        1.0,
+    )
+    zeros = np.zeros_like(damage, dtype=float)
+    ones = np.ones_like(damage, dtype=float)
     return damage, clock, {
-        "ontogenetic_fraction": fraction,
+        "ontogenetic_fraction": root_fraction,  # legacy key
+        "root_development_fraction": root_fraction,
         "root_depth_m": root_depth,
         "water_table_depth_m": water_table_depth,
+        "accessible_depth_m": accessible_depth,
         "drought_deficit_m": deficit,
+        "drought_relative_deficit": relative_deficit,
         "water_accessible": water_accessible,
         "drought_exposed": disconnected,
-        "drought_damaging": damaging,
+        "drought_damaging": disconnected,
         "drought_disconnection_hours": clock.copy(),
-        "drought_tolerance_hours": tolerance_hours,
-        "drought_reference_hours": reference_hours,
+        "drought_tolerance_hours": zeros,  # legacy diagnostic; no fixed tolerance used
+        "drought_reference_hours": np.full_like(damage, HOURS_PER_DAY),
         "recession_rate_cm_day": np.full_like(damage, recession),
-        "recession_damage_multiplier": np.full_like(damage, recession_multiplier),
+        "recession_damage_multiplier": ones,  # legacy key: recession no longer multiplies death
+        "drought_recession_severity": np.full_like(damage, recession_severity),
     }
 
 
@@ -610,38 +737,66 @@ class VegetationConfig:
     recruitment_box_lower_offset_m: float = 0.6
     recruitment_box_upper_offset_m: float = 2.0
 
-    # Caponi inundation resistance: effective age grows only in the GS
+    # Caponi inundation resistance: effective age grows only in the GS.
+    # Caponi et al. (2019) used R0=1 h and Rmax=60 d and calibrated sigma near
+    # 0.001 h^-1 (cross-validation approximately 0.0008--0.0016 h^-1) on Alpine
+    # Rhine gravel bars with pioneer Salicaceae including Salix and Populus.
     resistance_initial_hours: float = 1.0
     resistance_max_hours: float = 60.0 * 24.0
-    resistance_growth_rate: float = 0.001
+    resistance_growth_rate: float = 0.0010
 
-    # Other age-dependent traits use one configurable effective-age horizon
+    # Legacy late-stage effective-age horizon. It is retained for backward
+    # compatibility and slow post-first-year root extrapolation only; it is no
+    # longer a shared mortality clock for drought, shear and Shields.
     adult_resistance_age_calendar_years: float = 15.0
     growing_season_days_per_year: float = 183.0
     resistance_transition_days: float | None = None
 
-    # Shared cumulative-dose law for direct shear, bed mobility and drought
+    # Legacy dose/recovery fields are retained so existing user code loads.
+    # Revised mortality is process specific: direct shear uses a 24-h event
+    # reference and linear severity; drought uses root-deficit days; Shields is
+    # a bed-mobility diagnostic by default. The scheduled recovery values below
+    # are no longer applied by the recruitment step.
     dose_reference_hours_seedling: float = 24.0
-    dose_reference_hours_adult: float = 144.0
-    dose_damage_exponent: float = 1.5
+    dose_reference_hours_adult: float = 24.0
+    dose_damage_exponent: float = 1.0
     damage_recovery_half_after_hours: float = 7.0 * HOURS_PER_DAY
     damage_recovery_full_after_hours: float = 30.0 * HOURS_PER_DAY
 
+    # Direct hydraulic-damage screening. No universal Salix/Populus shear
+    # threshold exists because anchorage depends on size, roots, substrate,
+    # scour and loading duration. The 10--30 Pa defaults are deliberately
+    # labelled screening references informed by Pasquale et al. (2014) Salix
+    # field data and develop over approximately one effective growing season.
     enable_shear_mortality: bool = True
-    enable_shields_mortality: bool = True
-    shear_seedling_critical_pa: float = 20.0
-    shear_adult_critical_pa: float = 80.0
-    shields_critical: float = 0.045
-    shields_adult_multiplier: float = 8.0
-    shields_damage_rate_multiplier: float = 0.20
+    shear_seedling_critical_pa: float = 10.0
+    shear_adult_critical_pa: float = 30.0
 
-    # Drought: actual root-zone disconnection; no discharge-percentile gate
+    # Shields theta_c is a physical bed-mobility gate rather than a biological
+    # mortality threshold. 0.045 is retained as a central gravel-bed value but
+    # direct Shields mortality is OFF by default in this fixed-bed model.
+    enable_shields_mortality: bool = False
+    shields_critical: float = 0.045
+    shields_adult_multiplier: float = 1.0  # legacy field; no age x8 multiplier
+    shields_damage_rate_multiplier: float = 1.0
+
+    # Drought: root-zone water access rather than recession rate alone.
+    # The old 48 h -> 14 d tolerance fields are retained only for API backward
+    # compatibility and are not used by the revised mortality calculation.
     enable_drought_mortality: bool = True
     drought_tolerance_hours_seedling: float = 48.0
     drought_tolerance_hours_adult: float = 14.0 * HOURS_PER_DAY
     drought_damage_rate_multiplier: float = 1.0
     root_initial_depth_m: float = 0.05
+    # Generic temperate-Salicaceae defaults: early root extension of 0.75 cm/d
+    # and an approximately 0.8 m first-year cap avoid detailed plant allometry.
+    root_early_growth_m_per_day: float = 0.0075
+    root_first_year_max_depth_m: float = 0.80
     root_adult_depth_m: float = 4.0
+    # Added in SARAwater because the previous implementation compared roots
+    # directly with the water table. This default approximates capillary access
+    # on recruitment surfaces but should be calibrated for local sediment.
+    capillary_fringe_m: float = 0.40
 
     # Initial-state templates
     young_age_days: float = 180.0
@@ -703,6 +858,8 @@ class VegetationConfig:
             raise ValueError("rating_curve_points must be at least 12")
         if self.shields_critical <= 0 or self.shear_seedling_critical_pa <= 0 or self.shear_adult_critical_pa <= 0:
             raise ValueError("mechanical critical values must be positive")
+        if self.shear_adult_critical_pa < self.shear_seedling_critical_pa:
+            raise ValueError("shear screening range must satisfy seedling <= adult")
         if self.dose_reference_hours_seedling <= 0 or self.dose_reference_hours_adult <= 0:
             raise ValueError("dose reference durations must be positive")
         if self.damage_recovery_half_after_hours < 0 or self.damage_recovery_full_after_hours <= self.damage_recovery_half_after_hours:
@@ -713,6 +870,12 @@ class VegetationConfig:
             raise ValueError("drought_damage_rate_multiplier must be non-negative")
         if self.root_initial_depth_m < 0 or self.root_adult_depth_m < self.root_initial_depth_m:
             raise ValueError("root depths must satisfy 0 <= initial <= adult")
+        if self.root_early_growth_m_per_day < 0:
+            raise ValueError("root_early_growth_m_per_day must be non-negative")
+        if not self.root_initial_depth_m <= self.root_first_year_max_depth_m <= self.root_adult_depth_m:
+            raise ValueError("first-year root depth must lie between initial and adult depth")
+        if self.capillary_fringe_m < 0:
+            raise ValueError("capillary_fringe_m must be non-negative")
         if not 0.0 <= self.groundwater_coupling <= 1.0:
             raise ValueError("groundwater_coupling must be in [0, 1]")
         return self
@@ -1308,22 +1471,15 @@ def _recruitment_step(
         enable_shear=config.enable_shear_mortality,
         enable_shields=config.enable_shields_mortality,
         shields_damage_rate_multiplier=config.shields_damage_rate_multiplier,
+        mechanical_resistance_age_days=config.growing_season_days_per_year,
     )
 
-    shear_stress_active = alive_submerged & (mech["shear_excess"] > 0.0)
-    sediment_stress_active = alive_submerged & (mech["shields_excess"] > 0.0)
-    shear_damage, shear_recovery_hours, shear_recovery_reference = _apply_scheduled_recovery(
-        shear_damage, shear_recovery_hours, shear_recovery_reference,
-        alive=presence, stress_active=shear_stress_active, dt_hours=float(dt_hours),
-        half_after_hours=config.damage_recovery_half_after_hours,
-        full_after_hours=config.damage_recovery_full_after_hours,
-    )
-    sediment_damage, sediment_recovery_hours, sediment_recovery_reference = _apply_scheduled_recovery(
-        sediment_damage, sediment_recovery_hours, sediment_recovery_reference,
-        alive=presence, stress_active=sediment_stress_active, dt_hours=float(dt_hours),
-        half_after_hours=config.damage_recovery_half_after_hours,
-        full_after_hours=config.damage_recovery_full_after_hours,
-    )
+    # Legacy recovery state arrays are kept for backward compatibility, but the
+    # revised mechanical screening is event-specific and resets on emergence.
+    shear_recovery_hours[:] = 0.0
+    shear_recovery_reference[:] = 0.0
+    sediment_recovery_hours[:] = 0.0
+    sediment_recovery_reference[:] = 0.0
 
     drought_damage, drought_clock, drought_fields = update_drought_damage(
         drought_damage, drought_clock,
@@ -1341,14 +1497,13 @@ def _recruitment_step(
         tolerance_hours_adult=config.drought_tolerance_hours_adult,
         enabled=config.enable_drought_mortality,
         damage_rate_multiplier=config.drought_damage_rate_multiplier,
+        capillary_fringe_m=config.capillary_fringe_m,
+        root_early_growth_m_per_day=config.root_early_growth_m_per_day,
+        root_first_year_max_depth_m=config.root_first_year_max_depth_m,
+        root_first_year_effective_days=config.growing_season_days_per_year,
     )
-    drought_damage, drought_recovery_hours, drought_recovery_reference = _apply_scheduled_recovery(
-        drought_damage, drought_recovery_hours, drought_recovery_reference,
-        alive=presence, stress_active=drought_fields["drought_exposed"],
-        dt_hours=float(dt_hours),
-        half_after_hours=config.damage_recovery_half_after_hours,
-        full_after_hours=config.damage_recovery_full_after_hours,
-    )
+    drought_recovery_hours[:] = 0.0
+    drought_recovery_reference[:] = 0.0
 
     fail_anoxia = presence & (anoxia > resistance)
     fail_shear = presence & (shear_damage >= 1.0) & config.enable_shear_mortality
@@ -1444,8 +1599,11 @@ def _recruitment_step(
         "mean_drought_disconnection_hours": float(np.mean(drought_clock[presence]) if presence.any() else 0.0),
         "max_drought_disconnection_hours": float(np.max(drought_clock[presence]) if presence.any() else 0.0),
         "mean_root_depth_m": float(np.mean(drought_fields["root_depth_m"][presence]) if presence.any() else 0.0),
+        "mean_accessible_root_depth_m": float(np.mean(drought_fields["accessible_depth_m"][presence]) if presence.any() else 0.0),
         "mean_water_table_depth_m": float(np.mean(drought_fields["water_table_depth_m"][presence]) if presence.any() else 0.0),
+        "mean_drought_relative_deficit": float(np.mean(drought_fields["drought_relative_deficit"][presence]) if presence.any() else 0.0),
         "current_recession_rate_cm_day": float(recession_rate_cm_day),
+        "drought_recession_severity": float(drought_fields["drought_recession_severity"][0]) if drought_fields["drought_recession_severity"].size else 0.0,
         "drought_recession_multiplier": float(drought_fields["recession_damage_multiplier"][0]) if drought_fields["recession_damage_multiplier"].size else 1.0,
         "mean_drought_tolerance_hours": float(np.mean(drought_fields["drought_tolerance_hours"][presence]) if presence.any() else 0.0),
         "submerged_alive_cells": int(alive_submerged.sum()),
@@ -1671,13 +1829,17 @@ def run_vegetation(
                 "candidate_establishment_clock": "chronological consecutive hours",
                 "candidate_establishment_days": cfg.woo_days,
                 "drought_mortality": True,
-                "drought_definition": "root-zone disconnection with age-dependent 48 h to 14 d tolerance",
-                "drought_tolerance_hours_seedling": cfg.drought_tolerance_hours_seedling,
-                "drought_tolerance_hours_adult": cfg.drought_tolerance_hours_adult,
-                "drought_recession_modifier": "72 h mean recession classes: 1x <=5, 2x 5-10, 3x >10 cm/day",
-                "damage_recovery_schedule": "linear from stress cessation: 50% at 7 stress-free days; zero at 30 days",
+                "drought_definition": "root-zone disconnection severity x duration (root-deficit-day screening index)",
+                "drought_capillary_fringe_m": cfg.capillary_fringe_m,
+                "root_early_growth_m_per_day": cfg.root_early_growth_m_per_day,
+                "root_first_year_max_depth_m": cfg.root_first_year_max_depth_m,
+                "drought_recession_modifier": "diagnostic only; 2 and 6 cm/day interpretation markers do not multiply mortality",
+                "legacy_drought_tolerance_fields_used": False,
+                "damage_recovery_schedule": "process-specific event reset; legacy 7/30-day fields retained but not applied",
                 "camporeale_dichotomous": True,
                 "mechanical_extension": True,
+                "direct_shear_interpretation": "10-30 Pa Salix-informed screening range, not universal uprooting thresholds",
+                "direct_shields_mortality_enabled": cfg.enable_shields_mortality,
                 "explicit_candidate_seedlings": True,
                 "mortality_during_candidate_phase": True,
                 "instant_groundwater_tracking": True,
@@ -1686,7 +1848,8 @@ def run_vegetation(
                 "hourly_input_recommended": True,
                 "recruitment_box_model": "Mahoney and Rood 1998 metric offsets",
                 "fixed_shields_bed_threshold": cfg.shields_critical,
-                "shared_adult_effective_age_days": cfg.adult_resistance_age_days,
+                "shields_interpretation": "bed-mobility diagnostic; direct mortality off by default",
+                "legacy_late_stage_effective_age_days": cfg.adult_resistance_age_days,
             },
         },
         established=established_history,
